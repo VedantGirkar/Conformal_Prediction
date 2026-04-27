@@ -1,0 +1,90 @@
+import numpy as np
+import pandas as pd
+from sklearn.linear_model import LinearRegression
+
+from Config import DATE_COLUMN, MODEL_DIR
+from models.Common import (base_regression_metrics, coverage_targets, get_xy, load_processed_bundle,
+                           save_prediction_outputs)
+
+
+GRID_SIZE = 200
+GRID_PADDING_MULTIPLIER = 3.0
+
+
+def full_conformal_interval_for_x(model_x_train, model_y_train, x_new, coverage, y_min, y_max):
+    grid = np.linspace(y_min, y_max, GRID_SIZE)
+    accepted = []
+
+    for y_candidate in grid:
+        x_aug = np.vstack([model_x_train, x_new.reshape(1, -1)])
+        y_aug = np.concatenate([model_y_train, [y_candidate]])
+
+        model = LinearRegression()
+        model.fit(x_aug, y_aug)
+        pred_all = model.predict(x_aug)
+        scores = np.abs(y_aug - pred_all)
+        test_score = scores[-1]
+        p_value = np.mean(scores >= test_score)
+        if p_value > (1 - coverage):
+            accepted.append(y_candidate)
+
+    if not accepted:
+        return np.nan, np.nan
+    return float(min(accepted)), float(max(accepted))
+
+
+def run_linear_full() -> tuple[pd.DataFrame, list[dict]]:
+    bundle = load_processed_bundle()
+    combined_train = pd.concat([bundle.train, bundle.calibration], axis=0).reset_index(drop=True)
+    x_train, y_train = get_xy(combined_train, bundle.feature_columns, bundle.target_column)
+    x_test, y_test = get_xy(bundle.test, bundle.feature_columns, bundle.target_column)
+
+    base_model = LinearRegression()
+    base_model.fit(x_train, y_train)
+    test_pred = base_model.predict(x_test)
+    base_metrics = base_regression_metrics(y_test, test_pred)
+
+    residual_std = np.std(y_train - base_model.predict(x_train))
+    y_min = float(y_train.min() - GRID_PADDING_MULTIPLIER * residual_std)
+    y_max = float(y_train.max() + GRID_PADDING_MULTIPLIER * residual_std)
+
+    out = pd.DataFrame({
+        DATE_COLUMN: bundle.test[DATE_COLUMN].values,
+        "y_true": y_test,
+        "y_pred": test_pred,
+    })
+
+    summary = []
+    for coverage in coverage_targets():
+        lowers, uppers = [], []
+        for i in range(len(x_test)):
+            lo, hi = full_conformal_interval_for_x(x_train, y_train, x_test[i], coverage, y_min, y_max)
+            lowers.append(lo)
+            uppers.append(hi)
+
+        lowers = np.array(lowers)
+        uppers = np.array(uppers)
+        out[f"lower_{int(coverage*100)}"] = lowers
+        out[f"upper_{int(coverage*100)}"] = uppers
+        widths = uppers - lowers
+        emp_cov = np.mean((y_test >= lowers) & (y_test <= uppers))
+        row = {
+            "coverage_target": coverage,
+            "empirical_coverage": float(emp_cov),
+            "avg_interval_width": float(np.nanmean(widths)),
+            "median_interval_width": float(np.nanmedian(widths)),
+        }
+        row.update(base_metrics)
+        summary.append(row)
+
+    save_prediction_outputs(
+        out,
+        {"model": "linear_regression", "conformal": "full", "results": summary, "grid_size": GRID_SIZE},
+        MODEL_DIR / "linear_full_predictions.csv",
+        MODEL_DIR / "linear_full_summary.json",
+    )
+    return out, summary
+
+
+if __name__ == "__main__":
+    run_linear_full()
