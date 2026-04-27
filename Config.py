@@ -1,0 +1,46 @@
+from pathlib import Path
+
+PROJECT_ROOT = Path(__file__).resolve().parent
+DATA_DIR = PROJECT_ROOT / "data"
+RAW_DIR = DATA_DIR / "raw"
+PROCESSED_DIR = DATA_DIR / "processed"
+OUTPUT_DIR = PROJECT_ROOT / "outputs"
+CHART_DIR = OUTPUT_DIR / "charts"
+BACKTEST_DIR = OUTPUT_DIR / "backtest"
+MODEL_DIR = OUTPUT_DIR / "models"
+REPORT_DIR = OUTPUT_DIR / "report"
+
+TICKER = "SPY"
+VIX_TICKER = "^VIX"
+INTERVAL = "1d"
+START_DATE = "2010-01-01"
+END_DATE = None
+AUTO_ADJUST = True
+
+EMA_WINDOWS = [50, 200]
+WMA_WINDOW = 5
+VWAP_WINDOW = 5
+RETURN_HORIZON = 1
+
+TARGET_COLUMN = "target_next_day_return"
+DATE_COLUMN = "Date"
+RANDOM_SEED = 42
+
+TRAIN_RATIO = 0.70
+CALIBRATION_RATIO = 0.15
+TEST_RATIO = 0.15
+
+USE_VIX_FEATURES = True
+DROPNA_AFTER_FEATURES = True
+
+RAW_SPY_FILE = RAW_DIR / "spy_raw.csv"
+RAW_VIX_FILE = RAW_DIR / "vix_raw.csv"
+PROCESSED_PKL_FILE = PROCESSED_DIR / "spy_features.pkl"
+PROCESSED_CSV_FILE = PROCESSED_DIR / "spy_features.csv"
+SPLIT_METADATA_FILE = PROCESSED_DIR / "dataset_split_metadata.json"
+
+ALPHA_LEVELS = [0.50, 0.75, 0.90, 0.99]
+INITIAL_CAPITAL = 1_000_000
+
+for path in [RAW_DIR, PROCESSED_DIR, CHART_DIR, BACKTEST_DIR, MODEL_DIR, REPORT_DIR]:
+    path.mkdir(parents=True, exist_ok=True)
