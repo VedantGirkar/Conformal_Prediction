@@ -1,0 +1,481 @@
+"""
+Phase 4 — Charts.py
+Produces all visualisation PNGs for the project.
+
+Output structure (all under outputs/charts/):
+  conformal_bands/
+    <prefix>_bands_<coverage>.png   — prediction vs actual + shaded CP bands
+  equity_curves/
+    <prefix>_equity_all_alpha.png   — equity curves for all conformal sizings
+    combined_equity_comparison.png  — all models base strategy vs B&H
+  model_accuracy/
+    model_accuracy_comparison.png   — R², directional accuracy per model
+    interval_width_vs_coverage.png  — avg interval width vs coverage target
+  position_sizing/
+    <prefix>_position_sizing.png    — signal + % allocation over time
+  drawdown/
+    <prefix>_drawdown.png           — rolling drawdown per sizing level
+"""
+
+import json
+import warnings
+from pathlib import Path
+
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+import matplotlib.patches as mpatches
+import matplotlib.ticker as mticker
+import numpy as np
+import pandas as pd
+
+warnings.filterwarnings("ignore")
+
+from Config import (
+    ALPHA_LEVELS,
+    BACKTEST_DIR,
+    CHART_DIR,
+    DATE_COLUMN,
+    INITIAL_CAPITAL,
+    MODEL_DIR,
+)
+
+# ── colour palette ────────────────────────────────────────────────────────────
+PALETTE = {
+    "actual":      "#1f2937",
+    "predicted":   "#2563eb",
+    "bh":          "#6b7280",
+    "base":        "#f59e0b",
+    "alpha_50":    "#bfdbfe",
+    "alpha_75":    "#93c5fd",
+    "alpha_90":    "#3b82f6",
+    "alpha_99":    "#1d4ed8",
+    "positive":    "#10b981",
+    "negative":    "#ef4444",
+    "drawdown":    "#dc2626",
+}
+ALPHA_COLORS = {50: "#bfdbfe", 75: "#93c5fd", 90: "#3b82f6", 99: "#1d4ed8"}
+ALPHA_EQUITY = {50: "#f59e0b", 75: "#10b981", 90: "#3b82f6", 99: "#7c3aed"}
+
+PREFIXES = [
+    "linear_split", "linear_full",
+    "xgboost_split", "xgboost_full",
+    "nn_split",      "nn_full",
+]
+PRETTY = {
+    "linear_split":  "Linear Reg — Split CP",
+    "linear_full":   "Linear Reg — Full CP",
+    "xgboost_split": "XGBoost — Split CP",
+    "xgboost_full":  "XGBoost — Full CP",
+    "nn_split":      "Neural Net — Split CP",
+    "nn_full":       "Neural Net — Full CP",
+}
+
+STYLE = {
+    "figure.facecolor": "white",
+    "axes.facecolor":   "white",
+    "axes.grid":        True,
+    "grid.alpha":       0.35,
+    "grid.linestyle":   "--",
+    "axes.spines.top":  False,
+    "axes.spines.right":False,
+    "font.family":      "DejaVu Sans",
+    "axes.labelsize":   10,
+    "xtick.labelsize":  9,
+    "ytick.labelsize":  9,
+    "legend.fontsize":  9,
+}
+plt.rcParams.update(STYLE)
+
+
+# ── helpers ───────────────────────────────────────────────────────────────────
+
+def _savefig(fig, path: Path, dpi: int = 150) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(path, dpi=dpi, bbox_inches="tight")
+    plt.close(fig)
+    print(f"[Charts] Saved → {path}")
+
+
+def _load_signals(prefix: str) -> pd.DataFrame | None:
+    p = BACKTEST_DIR / f"{prefix}_signals.csv"
+    if not p.exists():
+        return None
+    return pd.read_csv(p, parse_dates=[DATE_COLUMN])
+
+
+def _load_backtest(prefix: str) -> pd.DataFrame | None:
+    p = BACKTEST_DIR / f"{prefix}_backtest.csv"
+    if not p.exists():
+        return None
+    return pd.read_csv(p, parse_dates=[DATE_COLUMN])
+
+
+def _load_model_summary(prefix: str) -> dict | None:
+    p = MODEL_DIR / f"{prefix}_summary.json"
+    if not p.exists():
+        return None
+    with open(p) as f:
+        return json.load(f)
+
+
+def _load_backtest_summary(prefix: str) -> dict | None:
+    p = BACKTEST_DIR / f"{prefix}_backtest_summary.json"
+    if not p.exists():
+        return None
+    with open(p) as f:
+        return json.load(f)
+
+
+def _rolling_drawdown(equity: pd.Series) -> pd.Series:
+    roll_max = equity.cummax()
+    return (equity - roll_max) / roll_max
+
+
+# ── Chart 1 : Conformal Prediction Bands ─────────────────────────────────────
+
+def plot_conformal_bands(prefix: str) -> None:
+    sig = _load_signals(prefix)
+    if sig is None:
+        return
+
+    out_dir = CHART_DIR / "conformal_bands"
+
+    for coverage in ALPHA_LEVELS:
+        tag = int(coverage * 100)
+        lower_col = f"lower_{tag}"
+        upper_col = f"upper_{tag}"
+        if lower_col not in sig.columns:
+            continue
+
+        fig, ax = plt.subplots(figsize=(14, 5))
+        dates  = sig[DATE_COLUMN]
+        y_true = sig["y_true"]
+        y_pred = sig["y_pred"]
+        lower  = sig[lower_col]
+        upper  = sig[upper_col]
+
+        # shaded band
+        ax.fill_between(
+            dates, lower, upper,
+            alpha=0.25,
+            color=ALPHA_COLORS[tag],
+            label=f"{tag}% CP interval",
+        )
+        # actual returns
+        ax.plot(dates, y_true, color=PALETTE["actual"],    lw=1.0,  label="Actual return",    alpha=0.85)
+        ax.plot(dates, y_pred, color=PALETTE["predicted"], lw=1.2,  label="Predicted return",  alpha=0.80, linestyle="--")
+        ax.axhline(0, color="#9ca3af", lw=0.8, linestyle=":")
+
+        covered  = ((y_true >= lower) & (y_true <= upper)).mean()
+        ax.set_title(
+            f"{PRETTY[prefix]}  |  {tag}% Coverage Band\n"
+            f"Empirical coverage: {covered:.1%}",
+            fontsize=11, fontweight="bold",
+        )
+        ax.set_xlabel("Date")
+        ax.set_ylabel("Next-day return")
+        ax.yaxis.set_major_formatter(mticker.PercentFormatter(xmax=1, decimals=1))
+        ax.legend(loc="upper left")
+        _savefig(fig, out_dir / f"{prefix}_bands_{tag}.png")
+
+
+# ── Chart 2 : Equity Curves per alpha level ───────────────────────────────────
+
+def plot_equity_curves_alpha(prefix: str) -> None:
+    bt = _load_backtest(prefix)
+    if bt is None:
+        return
+
+    out_dir = CHART_DIR / "equity_curves"
+    fig, ax = plt.subplots(figsize=(14, 5))
+
+    # buy-and-hold
+    if "bh_equity" in bt.columns:
+        ax.plot(bt[DATE_COLUMN], bt["bh_equity"],
+                color=PALETTE["bh"], lw=1.5, linestyle="--", label="Buy & Hold", alpha=0.8)
+    # base strategy
+    if "base_equity" in bt.columns:
+        ax.plot(bt[DATE_COLUMN], bt["base_equity"],
+                color=PALETTE["base"], lw=1.8, label="Base Crossover (100%)", alpha=0.9)
+    # conformal sized
+    for coverage in ALPHA_LEVELS:
+        tag = int(coverage * 100)
+        col = f"sized_equity_{tag}"
+        if col in bt.columns:
+            ax.plot(bt[DATE_COLUMN], bt[col],
+                    color=ALPHA_EQUITY[tag], lw=1.5,
+                    label=f"CP-Sized {tag}% coverage", alpha=0.85)
+
+    ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda x, _: f"${x:,.0f}"))
+    ax.set_title(f"{PRETTY[prefix]}  |  Equity Curves — All Alpha Levels",
+                 fontsize=11, fontweight="bold")
+    ax.set_xlabel("Date")
+    ax.set_ylabel(f"Portfolio Value (start = ${INITIAL_CAPITAL:,})")
+    ax.legend(loc="upper left", ncol=2)
+    _savefig(fig, out_dir / f"{prefix}_equity_all_alpha.png")
+
+
+# ── Chart 3 : Combined equity comparison (base strategy, all models) ──────────
+
+def plot_combined_equity_comparison() -> None:
+    fig, ax = plt.subplots(figsize=(14, 6))
+    colors = ["#1d4ed8", "#dc2626", "#10b981", "#f59e0b", "#7c3aed", "#0891b2"]
+    plotted_bh = False
+
+    for i, prefix in enumerate(PREFIXES):
+        bt = _load_backtest(prefix)
+        if bt is None:
+            continue
+        if not plotted_bh and "bh_equity" in bt.columns:
+            ax.plot(bt[DATE_COLUMN], bt["bh_equity"],
+                    color=PALETTE["bh"], lw=1.5, linestyle="--",
+                    label="Buy & Hold", alpha=0.7)
+            plotted_bh = True
+        if "base_equity" in bt.columns:
+            ax.plot(bt[DATE_COLUMN], bt["base_equity"],
+                    color=colors[i % len(colors)], lw=1.6,
+                    label=PRETTY[prefix], alpha=0.88)
+
+    ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda x, _: f"${x:,.0f}"))
+    ax.set_title("Combined Equity Comparison — Base Crossover Strategy (All Models)",
+                 fontsize=11, fontweight="bold")
+    ax.set_xlabel("Date")
+    ax.set_ylabel(f"Portfolio Value (start = ${INITIAL_CAPITAL:,})")
+    ax.legend(loc="upper left", ncol=2, fontsize=8)
+    _savefig(fig, CHART_DIR / "equity_curves" / "combined_equity_comparison.png")
+
+
+# ── Chart 4 : Model accuracy comparison (R², directional accuracy) ────────────
+
+def plot_model_accuracy_comparison() -> None:
+    records = []
+    for prefix in PREFIXES:
+        summary = _load_model_summary(prefix)
+        if summary is None:
+            continue
+        results = summary.get("results", [])
+        if not results:
+            continue
+        first = results[0]   # metrics are identical across alpha rows
+        records.append({
+            "model":               PRETTY[prefix],
+            "r2":                  first.get("r2", np.nan),
+            "directional_accuracy": first.get("directional_accuracy", np.nan),
+            "sign_accuracy":       first.get("sign_accuracy", np.nan),
+            "mae":                 first.get("mae", np.nan),
+        })
+
+    if not records:
+        print("[Charts] No model summaries found — skipping accuracy chart.")
+        return
+
+    df = pd.DataFrame(records)
+    fig, axes = plt.subplots(1, 3, figsize=(16, 5))
+    fig.suptitle("Base Model Performance Comparison", fontsize=12, fontweight="bold")
+
+    metrics = [
+        ("r2",                   "R² Score",               "Higher is better"),
+        ("directional_accuracy", "Directional Accuracy",   "% correct direction"),
+        ("mae",                  "MAE (next-day return)",   "Lower is better"),
+    ]
+    for ax, (col, title, note) in zip(axes, metrics):
+        vals   = df[col].fillna(0)
+        colors = [PALETTE["positive"] if v >= 0 else PALETTE["negative"] for v in vals]
+        bars   = ax.barh(df["model"], vals, color=colors, height=0.55, edgecolor="white")
+        ax.axvline(0, color="#374151", lw=0.8)
+        ax.set_title(f"{title}\n({note})", fontsize=9)
+        ax.set_xlabel(col)
+        for bar, v in zip(bars, vals):
+            ax.text(
+                bar.get_width() + (0.002 if v >= 0 else -0.002),
+                bar.get_y() + bar.get_height() / 2,
+                f"{v:.3f}", va="center", ha="left" if v >= 0 else "right", fontsize=8,
+            )
+
+    plt.tight_layout()
+    _savefig(fig, CHART_DIR / "model_accuracy" / "model_accuracy_comparison.png")
+
+
+# ── Chart 5 : Interval width vs coverage target ───────────────────────────────
+
+def plot_interval_width_vs_coverage() -> None:
+    fig, ax = plt.subplots(figsize=(10, 5))
+    colors = ["#1d4ed8", "#dc2626", "#10b981", "#f59e0b", "#7c3aed", "#0891b2"]
+
+    for i, prefix in enumerate(PREFIXES):
+        summary = _load_model_summary(prefix)
+        if summary is None:
+            continue
+        results = summary.get("results", [])
+        covs    = [r["coverage_target"]     for r in results if "avg_interval_width" in r]
+        widths  = [r["avg_interval_width"]  for r in results if "avg_interval_width" in r]
+        if not covs:
+            continue
+        ax.plot(
+            [c * 100 for c in covs], widths,
+            marker="o", lw=1.8, color=colors[i % len(colors)],
+            label=PRETTY[prefix],
+        )
+
+    ax.set_xlabel("Coverage Target (%)")
+    ax.set_ylabel("Average Interval Width")
+    ax.set_title("Conformal Interval Width vs Coverage Target\n(Wider = More Conservative)",
+                 fontsize=11, fontweight="bold")
+    ax.set_xticks([50, 75, 90, 99])
+    ax.legend(ncol=2, fontsize=8)
+    _savefig(fig, CHART_DIR / "model_accuracy" / "interval_width_vs_coverage.png")
+
+
+# ── Chart 6 : Position sizing over time ──────────────────────────────────────
+
+def plot_position_sizing(prefix: str) -> None:
+    sig = _load_signals(prefix)
+    if sig is None:
+        return
+
+    out_dir = CHART_DIR / "position_sizing"
+    fig, axes = plt.subplots(len(ALPHA_LEVELS) + 1, 1,
+                              figsize=(14, 3 * (len(ALPHA_LEVELS) + 1)),
+                              sharex=True)
+
+    # top panel: signal
+    ax0 = axes[0]
+    ax0.step(sig[DATE_COLUMN], sig["position"], where="post",
+             color=PALETTE["base"], lw=1.2, label="Position (0=flat, 1=long)")
+    ax0.set_ylabel("Position")
+    ax0.set_title(f"{PRETTY[prefix]}  |  Signal & Conformal Position Sizing",
+                  fontsize=11, fontweight="bold")
+    ax0.legend(loc="upper left", fontsize=8)
+    ax0.set_ylim(-0.1, 1.3)
+
+    for ax, coverage in zip(axes[1:], ALPHA_LEVELS):
+        tag = int(coverage * 100)
+        col = f"pct_alloc_{tag}"
+        if col not in sig.columns:
+            ax.set_visible(False)
+            continue
+        ax.fill_between(sig[DATE_COLUMN], 0, sig[col],
+                        step="post", alpha=0.6,
+                        color=ALPHA_EQUITY[tag],
+                        label=f"% Allocation — {tag}% CP coverage")
+        ax.set_ylabel("% Allocated")
+        ax.yaxis.set_major_formatter(mticker.PercentFormatter(xmax=100, decimals=0))
+        ax.legend(loc="upper left", fontsize=8)
+        ax.set_ylim(0, 105)
+
+    axes[-1].set_xlabel("Date")
+    plt.tight_layout()
+    _savefig(fig, out_dir / f"{prefix}_position_sizing.png")
+
+
+# ── Chart 7 : Rolling drawdown ────────────────────────────────────────────────
+
+def plot_drawdown(prefix: str) -> None:
+    bt = _load_backtest(prefix)
+    if bt is None:
+        return
+
+    out_dir = CHART_DIR / "drawdown"
+    fig, ax  = plt.subplots(figsize=(14, 5))
+
+    if "bh_equity" in bt.columns:
+        dd = _rolling_drawdown(bt["bh_equity"])
+        ax.fill_between(bt[DATE_COLUMN], dd, 0,
+                        alpha=0.25, color=PALETTE["bh"], label="Buy & Hold")
+
+    if "base_equity" in bt.columns:
+        dd = _rolling_drawdown(bt["base_equity"])
+        ax.fill_between(bt[DATE_COLUMN], dd, 0,
+                        alpha=0.30, color=PALETTE["base"], label="Base Crossover")
+
+    for coverage in ALPHA_LEVELS:
+        tag = int(coverage * 100)
+        col = f"sized_equity_{tag}"
+        if col in bt.columns:
+            dd = _rolling_drawdown(bt[col])
+            ax.plot(bt[DATE_COLUMN], dd,
+                    lw=1.2, color=ALPHA_EQUITY[tag],
+                    label=f"CP-Sized {tag}%", alpha=0.85)
+
+    ax.yaxis.set_major_formatter(mticker.PercentFormatter(xmax=1, decimals=1))
+    ax.set_title(f"{PRETTY[prefix]}  |  Rolling Drawdown",
+                 fontsize=11, fontweight="bold")
+    ax.set_xlabel("Date")
+    ax.set_ylabel("Drawdown")
+    ax.axhline(0, color="#9ca3af", lw=0.6)
+    ax.legend(loc="lower left", ncol=2, fontsize=8)
+    _savefig(fig, out_dir / f"{prefix}_drawdown.png")
+
+
+# ── Chart 8 : Empirical vs target coverage bar chart ─────────────────────────
+
+def plot_coverage_validation() -> None:
+    fig, axes = plt.subplots(2, 3, figsize=(18, 9), sharey=False)
+    fig.suptitle("Empirical Coverage vs Target Coverage\n(Valid CP must meet or exceed target)",
+                 fontsize=12, fontweight="bold")
+
+    for ax, prefix in zip(axes.flat, PREFIXES):
+        summary = _load_model_summary(prefix)
+        if summary is None:
+            ax.set_visible(False)
+            continue
+        results  = summary.get("results", [])
+        targets  = [r["coverage_target"] * 100 for r in results if "empirical_coverage" in r]
+        empirical= [r["empirical_coverage"] * 100 for r in results if "empirical_coverage" in r]
+        if not targets:
+            ax.set_visible(False)
+            continue
+
+        x     = np.arange(len(targets))
+        width = 0.35
+        bars1 = ax.bar(x - width/2, targets,   width, label="Target",   color="#d1d5db", edgecolor="white")
+        bars2 = ax.bar(x + width/2, empirical, width, label="Empirical",
+                       color=[PALETTE["positive"] if e >= t else PALETTE["negative"]
+                               for e, t in zip(empirical, targets)],
+                       edgecolor="white")
+        ax.set_xticks(x)
+        ax.set_xticklabels([f"{int(t)}%" for t in targets])
+        ax.set_xlabel("Coverage level")
+        ax.set_ylabel("Coverage (%)")
+        ax.set_title(PRETTY[prefix], fontsize=9, fontweight="bold")
+        ax.legend(fontsize=8)
+        ax.set_ylim(0, 115)
+
+        for bar, val in zip(bars2, empirical):
+            ax.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 1,
+                    f"{val:.1f}%", ha="center", va="bottom", fontsize=7)
+
+    plt.tight_layout()
+    _savefig(fig, CHART_DIR / "model_accuracy" / "coverage_validation.png")
+
+
+# ── Master runner ─────────────────────────────────────────────────────────────
+
+def run_all_charts() -> None:
+    print("[Charts] Starting Phase 4 chart generation ...")
+
+    # Per-model charts
+    for prefix in PREFIXES:
+        sig_exists = (BACKTEST_DIR / f"{prefix}_signals.csv").exists()
+        bt_exists  = (BACKTEST_DIR / f"{prefix}_backtest.csv").exists()
+
+        if sig_exists:
+            plot_conformal_bands(prefix)
+            plot_position_sizing(prefix)
+
+        if bt_exists:
+            plot_equity_curves_alpha(prefix)
+            plot_drawdown(prefix)
+
+    # Cross-model charts
+    plot_combined_equity_comparison()
+    plot_model_accuracy_comparison()
+    plot_interval_width_vs_coverage()
+    plot_coverage_validation()
+
+    print("[Charts] All charts complete.")
+
+
+if __name__ == "__main__":
+    run_all_charts()
