@@ -43,7 +43,7 @@ from Config import (
 # ── colour palette ────────────────────────────────────────────────────────────
 PALETTE = {
     "actual":      "#1f2937",
-    "predicted":   "#2563eb",
+    "predicted":   "#ff0000",
     "bh":          "#6b7280",
     "base":        "#f59e0b",
     "alpha_50":    "#bfdbfe",
@@ -55,7 +55,7 @@ PALETTE = {
     "drawdown":    "#dc2626",
 }
 ALPHA_COLORS = {50: "#bfdbfe", 75: "#93c5fd", 90: "#3b82f6", 99: "#1d4ed8"}
-ALPHA_EQUITY = {50: "#f59e0b", 75: "#10b981", 90: "#3b82f6", 99: "#7c3aed"}
+ALPHA_EQUITY = {50: "#ff0000", 75: "#10b981", 90: "#3b82f6", 99: "#7c3aed"}
 
 PREFIXES = [
     "linear_split", "linear_full",
@@ -164,7 +164,8 @@ def plot_conformal_bands(prefix: str) -> None:
         )
         # actual returns
         ax.plot(dates, y_true, color=PALETTE["actual"],    lw=1.0,  label="Actual return",    alpha=0.85)
-        ax.plot(dates, y_pred, color=PALETTE["predicted"], lw=1.2,  label="Predicted return",  alpha=0.80, linestyle="--")
+        ax.plot(dates, y_pred, color=PALETTE["predicted"], lw=1.2,  label="Predicted return",  alpha=0.80,
+                linestyle="solid")
         ax.axhline(0, color="#9ca3af", lw=0.8, linestyle=":")
 
         covered  = ((y_true >= lower) & (y_true <= upper)).mean()
@@ -178,6 +179,68 @@ def plot_conformal_bands(prefix: str) -> None:
         ax.yaxis.set_major_formatter(mticker.PercentFormatter(xmax=1, decimals=1))
         ax.legend(loc="upper left")
         _savefig(fig, out_dir / f"{prefix}_bands_{tag}.png")
+
+# ── Chart 1b : All conformal bands stacked on one chart (per model) ───────────
+
+def plot_all_bands_stacked(prefix: str) -> None:
+    """One chart per model showing all CP coverage bands layered on top of each other,
+    widest band on the bottom to narrowest on top — like a Keltner/Bollinger multi-band view."""
+    sig = _load_signals(prefix)
+    if sig is None:
+        return
+
+    # Check at least one band column exists
+    available = [int(c * 100) for c in ALPHA_LEVELS
+                 if f"lower_{int(c * 100)}" in sig.columns]
+    if not available:
+        return
+
+    out_dir = CHART_DIR / "conformal_bands"
+
+    # Band colours — outermost (99%) lightest, innermost (50%) darkest
+    BAND_COLORS = {50: "#1d4ed8", 75: "#3b82f6", 90: "#93c5fd", 99: "#dbeafe"}
+    # BAND_ALPHAS = {50: 0.55,      75: 0.45,      90: 0.35,      99: 0.25}
+    BAND_ALPHAS = {50: 0.25,        75: 0.35,      90: 0.45,    99: 0.55}
+
+    fig, ax = plt.subplots(figsize=(16, 6))
+    dates  = sig[DATE_COLUMN]
+    y_true = sig["y_true"]
+    y_pred = sig["y_pred"]
+
+    # Draw bands from widest (99) to narrowest (50) so narrow sits on top
+    for tag in sorted(available, reverse=True):
+        lower = sig[f"lower_{tag}"]
+        upper = sig[f"upper_{tag}"]
+        covered = ((y_true >= lower) & (y_true <= upper)).mean()
+        ax.fill_between(
+            dates, lower, upper,
+            alpha=BAND_ALPHAS[tag],
+            color=BAND_COLORS[tag],
+            label=f"{tag}% band  (coverage: {covered:.1%})",
+        )
+
+    # Actual return on top
+    ax.plot(dates, y_true,
+            color=PALETTE["actual"], lw=0.9, alpha=0.85, label="Actual return", zorder=5)
+    # Predicted return
+    ax.plot(dates, y_pred,
+            color="#ff0000", lw=1.4, alpha=0.90, linestyle="solid",
+            label="Predicted return", zorder=6)
+    ax.axhline(0, color="#9ca3af", lw=0.7, linestyle=":")
+
+    ax.set_title(
+        f"{PRETTY[prefix]}  |  All Conformal Bands — 50 / 75 / 90 / 99%",
+        fontsize=11, fontweight="bold",
+    )
+    ax.set_xlabel("Date")
+    ax.set_ylabel("Next-day return")
+    ax.yaxis.set_major_formatter(mticker.PercentFormatter(xmax=1, decimals=1))
+
+    # Legend: put coverage bands first, then actual/predicted
+    handles, labels = ax.get_legend_handles_labels()
+    ax.legend(handles, labels, loc="upper left", ncol=3, fontsize=8, framealpha=0.9)
+
+    _savefig(fig, out_dir / f"{prefix}_bands_all.png")
 
 
 # ── Chart 2 : Equity Curves per alpha level ───────────────────────────────────
@@ -449,6 +512,156 @@ def plot_coverage_validation() -> None:
     plt.tight_layout()
     _savefig(fig, CHART_DIR / "model_accuracy" / "coverage_validation.png")
 
+# ── Chart 9 : Trade activity — entries, confidence, returns ──────────────────
+
+def plot_trade_activity(prefix: str, coverage: float = 0.90) -> None:
+    sig = _load_signals(prefix)
+    if sig is None:
+        return
+
+    tag      = int(coverage * 100)
+    conf_col = f"confidence_{tag}"
+    alloc_col= f"dollar_alloc_{tag}"
+    pct_col  = f"pct_alloc_{tag}"
+
+    if "position" not in sig.columns:
+        return
+
+    has_conf  = conf_col  in sig.columns
+    has_alloc = alloc_col in sig.columns or pct_col in sig.columns
+
+    dates    = sig[DATE_COLUMN]
+    y_true   = sig["y_true"]
+    y_pred   = sig["y_pred"]
+    position = sig["position"].fillna(0)
+
+    # ── detect entry / exit events ────────────────────────────────────────────
+    pos_shifted = position.shift(1).fillna(0)
+    entry_mask  = (position == 1) & (pos_shifted == 0)
+    exit_mask   = (position == 0) & (pos_shifted == 1)
+
+    # ── confidence series (fallback to flat 1.0 if column missing) ───────────
+    if has_conf:
+        conf = sig[conf_col].fillna(0.05).clip(0.05, 1.0)
+    else:
+        conf = position.clip(0, 1).replace(0, np.nan).ffill().fillna(0)
+
+    # ── layout ────────────────────────────────────────────────────────────────
+    n_panels = 3 if has_alloc else 2
+    heights  = [4, 1.8, 1.2] if n_panels == 3 else [4, 1.8]
+    fig, axes = plt.subplots(
+        n_panels, 1,
+        figsize=(16, sum(heights) + 0.5),
+        sharex=True,
+        gridspec_kw={"height_ratios": heights, "hspace": 0.08},
+    )
+    ax1 = axes[0]
+    ax2 = axes[1]
+    ax3 = axes[2] if n_panels == 3 else None
+
+    # ── Panel 1: Returns + shaded in-market windows + entry/exit markers ──────
+    in_market = False
+    seg_start = None
+    for i, (p, c) in enumerate(zip(position, conf)):
+        if p == 1 and not in_market:
+            in_market = True
+            seg_start = i
+        elif p == 0 and in_market:
+            seg_conf = conf.iloc[seg_start:i].mean()
+            ax1.axvspan(
+                dates.iloc[seg_start], dates.iloc[i - 1],
+                alpha=0.08 + 0.18 * seg_conf,
+                color="#10b981", lw=0,
+            )
+            in_market = False
+    if in_market:
+        seg_conf = conf.iloc[seg_start:].mean()
+        ax1.axvspan(
+            dates.iloc[seg_start], dates.iloc[-1],
+            alpha=0.08 + 0.18 * seg_conf,
+            color="#10b981", lw=0,
+        )
+
+    ax1.plot(dates, y_true,
+             color=PALETTE["actual"], lw=0.9, alpha=0.85,
+             label="Actual return", zorder=4)
+    ax1.plot(dates, y_pred,
+             color="#ef4444", lw=1.4, alpha=0.90,
+             linestyle="-", label="Predicted return", zorder=5)
+    ax1.axhline(0, color="#9ca3af", lw=0.7, linestyle=":")
+
+    # entry markers ▲
+    if entry_mask.any():
+        ax1.scatter(
+            dates[entry_mask].values, y_pred[entry_mask].values,
+            marker="^", s=40, color="#10b981", zorder=6,
+            label=f"Entry ({entry_mask.sum()})", linewidths=0,
+        )
+    # exit markers ▼
+    if exit_mask.any():
+        ax1.scatter(
+            dates[exit_mask].values, y_pred[exit_mask].values,
+            marker="v", s=40, color="#f59e0b", zorder=6,
+            label=f"Exit ({exit_mask.sum()})", linewidths=0,
+        )
+
+    ax1.set_ylabel("Next-day return")
+    ax1.yaxis.set_major_formatter(mticker.PercentFormatter(xmax=1, decimals=1))
+    ax1.set_title(
+        f"{PRETTY[prefix]}  |  Trade Activity & Confidence  [{tag}% CP sizing]",
+        fontsize=11, fontweight="bold",
+    )
+    ax1.legend(loc="upper left", ncol=4, fontsize=8, framealpha=0.9)
+
+    # ── Panel 2: Confidence score + position step line ────────────────────────
+    for i in range(len(dates) - 1):
+        c = conf.iloc[i]
+        p = position.iloc[i]
+        if p == 0:
+            continue
+        r = 1.0 - c
+        g = c
+        ax2.fill_between(
+            [dates.iloc[i], dates.iloc[i + 1]],
+            [0, 0],
+            [c, conf.iloc[i + 1]],
+            color=(r * 0.9, g * 0.7, 0.1),
+            alpha=0.75,
+            linewidth=0,
+        )
+
+    ax2.step(dates, position, where="post",
+             color="#374151", lw=1.2, alpha=0.6, label="Position (0/1)")
+    ax2.axhline(0.5, color="#9ca3af", lw=0.8, linestyle="--", alpha=0.6)
+    ax2.text(dates.iloc[2], 0.52, "50% conf", fontsize=7, color="#6b7280")
+    ax2.set_ylabel("Confidence")
+    ax2.set_ylim(0, 1.15)
+    ax2.yaxis.set_major_formatter(mticker.PercentFormatter(xmax=1, decimals=0))
+    ax2.legend(loc="upper left", fontsize=8)
+
+    # ── Panel 3: Dollar allocation bars ──────────────────────────────────────
+    if ax3 is not None:
+        if alloc_col in sig.columns:
+            alloc = sig[alloc_col].fillna(0)
+        else:
+            alloc = (sig[pct_col].fillna(0) / 100) * INITIAL_CAPITAL
+
+        bar_colors = ["#10b981" if v > 0 else "#e5e7eb" for v in alloc]
+        ax3.bar(dates, alloc, width=1.5, color=bar_colors, alpha=0.80, linewidth=0)
+        ax3.set_ylabel("$ Deployed")
+        ax3.yaxis.set_major_formatter(
+            mticker.FuncFormatter(lambda x, _: f"${x/1e3:.0f}k")
+        )
+        ax3.set_xlabel("Date")
+    else:
+        ax2.set_xlabel("Date")
+
+    plt.tight_layout()
+    _savefig(
+        fig,
+        CHART_DIR / "conformal_bands" / f"{prefix}_trade_activity.png",
+    )
+
 
 # ── Master runner ─────────────────────────────────────────────────────────────
 
@@ -462,6 +675,8 @@ def run_all_charts() -> None:
 
         if sig_exists:
             plot_conformal_bands(prefix)
+            plot_all_bands_stacked(prefix)
+            plot_trade_activity(prefix)
             plot_position_sizing(prefix)
 
         if bt_exists:

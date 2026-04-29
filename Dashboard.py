@@ -282,6 +282,248 @@ def _bands_fig() -> str:
     )
     return to_html(fig, full_html=False, config=PLOTLY_CONFIG, include_plotlyjs=False)
 
+def _stacked_bands_fig() -> str:
+    """Interactive stacked conformal bands — all coverage levels per model, outermost darkest."""
+    BAND_COLORS = {
+        99: "rgba(30,58,95,{a})",
+        90: "rgba(29,78,216,{a})",
+        75: "rgba(96,165,250,{a})",
+        50: "rgba(191,219,254,{a})",
+    }
+    BAND_ALPHAS = {99: 0.55, 90: 0.50, 75: 0.45, 50: 0.40}
+
+    all_traces, vis_map, trace_idx, buttons = [], {}, 0, []
+
+    for prefix in PREFIXES:
+        sig = _load_signals(prefix)
+        if sig is None:
+            continue
+        dates  = sig[DATE_COLUMN]
+        y_true = sig["y_true"]
+        y_pred = sig["y_pred"]
+        indices = []
+
+        # Draw bands outermost first (99 → 50) so innermost paints on top
+        for tag in [99, 90, 75, 50]:
+            lcol = f"lower_{tag}"
+            ucol = f"upper_{tag}"
+            if lcol not in sig.columns:
+                continue
+            color = BAND_COLORS[tag].format(a=BAND_ALPHAS[tag])
+            covered = ((y_true >= sig[lcol]) & (y_true <= sig[ucol])).mean()
+            all_traces.append(go.Scatter(
+                x=pd.concat([dates, dates[::-1]]),
+                y=pd.concat([sig[ucol], sig[lcol][::-1]]),
+                fill="toself", fillcolor=color,
+                line=dict(color="rgba(0,0,0,0)"),
+                name=f"{tag}% band (cov: {covered:.1%})",
+                showlegend=True, visible=False,
+            ))
+            indices.append(trace_idx); trace_idx += 1
+
+        # Actual return
+        all_traces.append(go.Scatter(
+            x=dates, y=y_true, name="Actual return",
+            line=dict(color="#1f2937", width=1), opacity=0.85,
+            visible=False,
+        ))
+        indices.append(trace_idx); trace_idx += 1
+
+        # Predicted return — red solid, topmost
+        all_traces.append(go.Scatter(
+            x=dates, y=y_pred, name="Predicted return",
+            line=dict(color="#ef4444", width=1.5), opacity=0.90,
+            visible=False,
+        ))
+        indices.append(trace_idx); trace_idx += 1
+
+        vis_map[prefix] = indices
+
+    for prefix, idxs in vis_map.items():
+        visibility = [i in idxs for i in range(len(all_traces))]
+        buttons.append(dict(
+            label=PRETTY[prefix], method="update",
+            args=[{"visible": visibility},
+                  {"title": f"All Conformal Bands — {PRETTY[prefix]}"}],
+        ))
+
+    if not all_traces:
+        return "<p>No signal data for stacked bands chart.</p>"
+
+    first = list(vis_map.keys())[0]
+    for i, tr in enumerate(all_traces):
+        tr.visible = i in vis_map[first]
+
+    fig = go.Figure(data=all_traces)
+    fig.update_layout(
+        title=f"All Conformal Bands — {PRETTY[first]}",
+        yaxis_title="Next-day return", yaxis_tickformat=".2%",
+        updatemenus=[dict(
+            buttons=buttons, direction="down",
+            x=0.01, y=1.15, xanchor="left", yanchor="top",
+            bgcolor="#f1f5f9", bordercolor="#cbd5e1",
+        )],
+        hovermode="x unified", template="plotly_white", height=480,
+    )
+    return to_html(fig, full_html=False, config=PLOTLY_CONFIG, include_plotlyjs=False)
+
+def _trade_activity_fig() -> str:
+    """Interactive 3-panel trade activity: returns+entries, confidence, $ allocation."""
+    buttons, all_traces, trace_idx, vis_map = [], [], 0, {}
+    DEFAULT_COVERAGE = 0.90
+
+    for prefix in PREFIXES:
+        sig = _load_signals(prefix)
+        if sig is None or "position" not in sig.columns:
+            continue
+
+        tag        = int(DEFAULT_COVERAGE * 100)
+        conf_col   = f"confidence_{tag}"
+        alloc_col  = f"dollar_alloc_{tag}"
+        pct_col    = f"pct_alloc_{tag}"
+        dates      = sig[DATE_COLUMN]
+        y_true     = sig["y_true"]
+        y_pred     = sig["y_pred"]
+        position   = sig["position"].fillna(0)
+        conf       = sig[conf_col].fillna(0.05).clip(0.05, 1.0) if conf_col in sig.columns \
+                     else position.clip(0, 1).replace(0, np.nan).ffill().fillna(0)
+
+        pos_shifted = position.shift(1).fillna(0)
+        entry_mask  = (position == 1) & (pos_shifted == 0)
+        exit_mask   = (position == 0) & (pos_shifted == 1)
+
+        indices = []
+
+        # Panel 1: in-market shading
+        in_market, seg_start = False, None
+        for i, (p, _) in enumerate(zip(position, conf)):
+            if p == 1 and not in_market:
+                in_market, seg_start = True, i
+            elif p == 0 and in_market:
+                seg_conf = conf.iloc[seg_start:i].mean()
+                all_traces.append(go.Scatter(
+                    x=[dates.iloc[seg_start], dates.iloc[seg_start],
+                       dates.iloc[i-1],       dates.iloc[i-1]],
+                    y=[y_true.min()-0.001, y_true.max()+0.001,
+                       y_true.max()+0.001, y_true.min()-0.001],
+                    fill="toself",
+                    fillcolor=f"rgba(16,185,129,{0.06 + 0.14*seg_conf:.2f})",
+                    line=dict(color="rgba(0,0,0,0)"),
+                    showlegend=False, visible=False, hoverinfo="skip",
+                ))
+                indices.append(trace_idx); trace_idx += 1
+                in_market = False
+        if in_market:
+            seg_conf = conf.iloc[seg_start:].mean()
+            all_traces.append(go.Scatter(
+                x=[dates.iloc[seg_start], dates.iloc[seg_start],
+                   dates.iloc[-1],        dates.iloc[-1]],
+                y=[y_true.min()-0.001, y_true.max()+0.001,
+                   y_true.max()+0.001, y_true.min()-0.001],
+                fill="toself",
+                fillcolor=f"rgba(16,185,129,{0.06 + 0.14*seg_conf:.2f})",
+                line=dict(color="rgba(0,0,0,0)"),
+                showlegend=False, visible=False, hoverinfo="skip",
+            ))
+            indices.append(trace_idx); trace_idx += 1
+
+        # Actual + predicted
+        all_traces.append(go.Scatter(
+            x=dates, y=y_true, name="Actual return",
+            line=dict(color="#1f2937", width=0.9), opacity=0.85,
+            visible=False,
+        ))
+        indices.append(trace_idx); trace_idx += 1
+
+        all_traces.append(go.Scatter(
+            x=dates, y=y_pred, name="Predicted return",
+            line=dict(color="#ef4444", width=1.4), opacity=0.90,
+            visible=False,
+        ))
+        indices.append(trace_idx); trace_idx += 1
+
+        # Entry markers
+        if entry_mask.any():
+            all_traces.append(go.Scatter(
+                x=dates[entry_mask], y=y_pred[entry_mask],
+                mode="markers", name=f"Entry ({entry_mask.sum()})",
+                marker=dict(symbol="triangle-up", size=9, color="#10b981"),
+                visible=False,
+            ))
+            indices.append(trace_idx); trace_idx += 1
+
+        # Exit markers
+        if exit_mask.any():
+            all_traces.append(go.Scatter(
+                x=dates[exit_mask], y=y_pred[exit_mask],
+                mode="markers", name=f"Exit ({exit_mask.sum()})",
+                marker=dict(symbol="triangle-down", size=9, color="#f59e0b"),
+                visible=False,
+            ))
+            indices.append(trace_idx); trace_idx += 1
+
+        # Confidence fill
+        conf_colors = [
+            f"rgba({int((1-c)*230)},{int(c*178)},25,0.75)" for c in conf
+        ]
+        all_traces.append(go.Bar(
+            x=dates, y=conf * position,
+            name="Confidence (in-market)", marker_color=conf_colors,
+            visible=False, yaxis="y2",
+        ))
+        indices.append(trace_idx); trace_idx += 1
+
+        # Dollar allocation
+        if alloc_col in sig.columns:
+            alloc = sig[alloc_col].fillna(0)
+        elif pct_col in sig.columns:
+            alloc = (sig[pct_col].fillna(0) / 100) * INITIAL_CAPITAL
+        else:
+            alloc = None
+
+        if alloc is not None:
+            bar_colors = ["#10b981" if v > 0 else "#e5e7eb" for v in alloc]
+            all_traces.append(go.Bar(
+                x=dates, y=alloc,
+                name="$ Deployed", marker_color=bar_colors,
+                visible=False, yaxis="y3",
+            ))
+            indices.append(trace_idx); trace_idx += 1
+
+        vis_map[prefix] = indices
+
+    for prefix, idxs in vis_map.items():
+        visibility = [i in idxs for i in range(len(all_traces))]
+        buttons.append(dict(
+            label=PRETTY[prefix], method="update",
+            args=[{"visible": visibility},
+                  {"title": f"Trade Activity & Confidence — {PRETTY[prefix]}"}],
+        ))
+
+    if not all_traces:
+        return "<p>No data found for trade activity chart.</p>"
+
+    first = list(vis_map.keys())[0]
+    for i, tr in enumerate(all_traces):
+        tr.visible = i in vis_map[first]
+
+    fig = go.Figure(data=all_traces)
+    fig.update_layout(
+        title=f"Trade Activity & Confidence — {PRETTY[first]}",
+        yaxis=dict(title="Next-day return", tickformat=".2%", domain=[0.45, 1.0]),
+        yaxis2=dict(title="Confidence", tickformat=".0%",
+                    domain=[0.25, 0.43], range=[0, 1.15]),
+        yaxis3=dict(title="$ Deployed", tickprefix="$", tickformat=",.0f",
+                    domain=[0.0, 0.23]),
+        updatemenus=[dict(
+            buttons=buttons, direction="down",
+            x=0.01, y=1.12, xanchor="left", yanchor="top",
+            bgcolor="#f1f5f9", bordercolor="#cbd5e1",
+        )],
+        hovermode="x unified", template="plotly_white",
+        height=700, barmode="overlay",
+    )
+    return to_html(fig, full_html=False, config=PLOTLY_CONFIG, include_plotlyjs=False)
 
 def _hex_to_rgb(hex_color: str) -> tuple:
     h = hex_color.lstrip("#")
@@ -652,6 +894,8 @@ def build_dashboard() -> None:
         ("kpi",      "📊 Key Performance Indicators", _kpi_cards_html()),
         ("equity",   "📈 Equity Curves",               _equity_fig()),
         ("bands",    "🎯 Conformal Prediction Bands",  _bands_fig()),
+        ("stacked", "📊 All Bands Stacked", _stacked_bands_fig()),  # NEW
+        ("trades", "🔀 Trade Activity & Confidence", _trade_activity_fig()),  # NEW
         ("coverage", "✅ Coverage Validation",          _coverage_fig()),
         ("width",    "↔ Interval Width vs Coverage",   _width_fig()),
         ("drawdown", "📉 Rolling Drawdown",             _drawdown_fig()),

@@ -239,12 +239,34 @@ def _section_conformal_bands() -> str:
     parts = []
     for prefix in PREFIXES:
         parts.append(f"<h3>{PRETTY[prefix]}</h3>")
+        # stacked all-bands chart first
+        stacked_path = CHART_DIR / "conformal_bands" / f"{prefix}_bands_all.png"
+        parts.append(_embed(stacked_path, f"All bands overlaid — {PRETTY[prefix]}"))
+        # individual coverage-level charts
         inner = ""
         for coverage in ALPHA_LEVELS:
             tag = int(coverage * 100)
             img_path = CHART_DIR / "conformal_bands" / f"{prefix}_bands_{tag}.png"
             inner += _embed(img_path, f"{tag}% Coverage Band")
         parts.append(f'<div class="grid-2">{inner}</div>')
+    return "\n".join(parts)
+
+def _section_bands_stacked() -> str:
+    """One stacked-band chart per model (all CP levels overlaid)."""
+    parts = []
+    for prefix in PREFIXES:
+        img_path = CHART_DIR / "conformal_bands" / f"{prefix}_bands_all.png"
+        parts.append(_embed(img_path, f"{PRETTY[prefix]} — All Bands Stacked"))
+    return '<div class="grid-2">' + "".join(parts) + "</div>"
+
+
+def _section_trade_activity() -> str:
+    """3-panel trade activity chart per model."""
+    parts = []
+    for prefix in PREFIXES:
+        img_path = CHART_DIR / "conformal_bands" / f"{prefix}_trade_activity.png"
+        parts.append(f"<h3>{PRETTY[prefix]}</h3>")
+        parts.append(_embed(img_path, f"{PRETTY[prefix]} — Trade Activity & Confidence"))
     return "\n".join(parts)
 
 
@@ -301,6 +323,7 @@ def build_report() -> None:
   <a href="#sizing">Position Sizing</a>
   <a href="#drawdown">Drawdown</a>
   <a href="#backtest">Backtest Summary</a>
+  <a href="#trades">Trade Activity</a>
 </nav>
 <div class="content">
 
@@ -345,6 +368,11 @@ def build_report() -> None:
 <section id="backtest">
   <h2>7. Full Backtest Performance Summary</h2>
   {_backtest_table()}
+</section>
+
+<section id="trades">
+  <h2>8. Trade Activity, Confidence & Position Sizing</h2>
+  {_section_trade_activity()}
 </section>
 
 </div>

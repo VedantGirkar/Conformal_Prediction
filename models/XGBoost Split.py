@@ -1,4 +1,5 @@
 import pandas as pd
+import numpy as np
 from xgboost import XGBRegressor
 
 from Config import DATE_COLUMN, MODEL_DIR, RANDOM_SEED
@@ -34,17 +35,22 @@ def run_xgboost_split() -> tuple[pd.DataFrame, list[dict]]:
 
     cal_pred = model.predict(x_cal)
     test_pred = model.predict(x_test)
-    cal_scores = abs(y_cal - cal_pred)
+
+    upper_scores = y_cal - cal_pred  # positive = truth above prediction
+    lower_scores = cal_pred - y_cal  # positive = prediction above truth
 
     out = pd.DataFrame({DATE_COLUMN: bundle.test[DATE_COLUMN].values, "y_true": y_test, "y_pred": test_pred})
     interval_map = {}
     for coverage in coverage_targets():
-        qhat = conformal_quantile(cal_scores, coverage)
-        lower = test_pred - qhat
-        upper = test_pred + qhat
+        n = len(upper_scores)
+        q_level = min(np.ceil((n + 1) * coverage) / n, 1.0)
+        q_upper = float(np.quantile(upper_scores, q_level, method="higher"))
+        q_lower = float(np.quantile(lower_scores, q_level, method="higher"))
+        lower = test_pred - q_lower
+        upper = test_pred + q_upper
         out[f"lower_{int(coverage*100)}"] = lower
         out[f"upper_{int(coverage*100)}"] = upper
-        interval_map[coverage] = {"lower": lower, "upper": upper, "qhat": qhat}
+        interval_map[coverage] = {"lower": lower, "upper": upper, "qhat": (q_upper + q_lower) / 2}
 
     summary = build_alpha_records(y_test, test_pred, interval_map)
     save_prediction_outputs(
