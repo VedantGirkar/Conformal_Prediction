@@ -89,3 +89,4 @@ def build_feature_set() -> pd.DataFrame:
 if __name__ == "__main__":
     df = build_feature_set()
     print(df.tail())
+    print(df.info())
